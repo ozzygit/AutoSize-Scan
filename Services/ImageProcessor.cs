@@ -77,10 +77,8 @@ public static class ImageProcessor
             }
         }
 
-        int top = FirstIndexAtLeast(rowEdges, minEdgePerRow, forward: true);
-        int bottom = FirstIndexAtLeast(rowEdges, minEdgePerRow, forward: false);
-        int left = FirstIndexAtLeast(colEdges, minEdgePerCol, forward: true);
-        int right = FirstIndexAtLeast(colEdges, minEdgePerCol, forward: false);
+        var (top, bottom) = LargestSegment(rowEdges, minEdgePerRow);
+        var (left, right) = LargestSegment(colEdges, minEdgePerCol);
 
         // No textured region detected -> keep the original.
         if (top < 0 || bottom < 0 || left < 0 || right < 0 || bottom <= top || right <= left)
@@ -115,22 +113,50 @@ public static class ImageProcessor
         return cropped;
     }
 
-    private static int FirstIndexAtLeast(int[] counts, int threshold, bool forward)
+    // Gaps up to this many low-content entries are bridged when measuring a
+    // content segment, so smooth interior regions of a photo don't split it,
+    // while a clearly detached strip (separated by a wider blank gap) stays
+    // its own segment and is excluded.
+    private const int MaxGap = 8;
+
+    /// <summary>
+    /// Finds the longest segment of rows/columns whose content count meets
+    /// <paramref name="threshold"/>, bridging blank gaps up to <see cref="MaxGap"/>.
+    /// The photo is the dominant segment, so detached artifact strips (scanner
+    /// seams, slivers of adjacent photos, calibration lines) are ignored.
+    /// Returns (-1, -1) when no qualifying content exists.
+    /// </summary>
+    private static (int start, int end) LargestSegment(int[] counts, int threshold)
     {
-        if (forward)
+        int bestStart = -1, bestEnd = -1, bestLen = 0;
+        int curStart = -1, curEnd = -1, gap = 0;
+
+        for (int i = 0; i < counts.Length; i++)
         {
-            for (int i = 0; i < counts.Length; i++)
+            if (counts[i] >= threshold)
             {
-                if (counts[i] >= threshold) return i;
+                if (curStart < 0) curStart = i;
+                curEnd = i;
+                gap = 0;
+            }
+            else if (curStart >= 0)
+            {
+                if (++gap > MaxGap)
+                {
+                    int len = curEnd - curStart + 1;
+                    if (len > bestLen) { bestLen = len; bestStart = curStart; bestEnd = curEnd; }
+                    curStart = -1;
+                    gap = 0;
+                }
             }
         }
-        else
+
+        if (curStart >= 0)
         {
-            for (int i = counts.Length - 1; i >= 0; i--)
-            {
-                if (counts[i] >= threshold) return i;
-            }
+            int len = curEnd - curStart + 1;
+            if (len > bestLen) { bestStart = curStart; bestEnd = curEnd; }
         }
-        return -1;
+
+        return (bestStart, bestEnd);
     }
 }

@@ -1,4 +1,5 @@
 ﻿using System.Windows;
+using System.Windows.Input;
 using System.Windows.Media.Imaging;
 using AutoSizeScan.Services;
 using AutoSizeScan.Models;
@@ -16,6 +17,12 @@ public partial class MainWindow : Window
     private readonly ScannerService _scannerService;
     private BitmapSource? _lastScannedImage;
     private bool _hasUnsavedScan;
+
+    // Preview zoom state.
+    private const double MinZoom = 0.1;
+    private const double MaxZoom = 8.0;
+    private const double ZoomStep = 1.2;
+    private double _zoom = 1.0;
     
     public MainWindow()
     {
@@ -123,7 +130,7 @@ public partial class MainWindow : Window
             _lastScannedImage = cropped;
             _hasUnsavedScan = true;
             PreviewImage.Source = cropped;
-            DimensionsText.Text = $"Photo dimensions: {cropW} x {cropH} pixels";
+            FitToWindow();
             StatusText.Text = "Scan complete - click Save to store the photo";
             SaveButton.IsEnabled = true;
         }
@@ -187,7 +194,99 @@ public partial class MainWindow : Window
         _lastScannedImage = null;
         _hasUnsavedScan = false;
         PreviewImage.Source = null;
+        PreviewImage.Width = double.NaN;
+        PreviewImage.Height = double.NaN;
+        _zoom = 1.0;
         DimensionsText.Text = string.Empty;
         SaveButton.IsEnabled = false;
+    }
+
+    // ---- Preview zoom / scroll ----
+
+    private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (Keyboard.Modifiers != ModifierKeys.Control)
+        {
+            return;
+        }
+
+        switch (e.Key)
+        {
+            case Key.OemPlus:
+            case Key.Add:
+                SetZoom(_zoom * ZoomStep);
+                e.Handled = true;
+                break;
+            case Key.OemMinus:
+            case Key.Subtract:
+                SetZoom(_zoom / ZoomStep);
+                e.Handled = true;
+                break;
+            case Key.D0:
+            case Key.NumPad0:
+                FitToWindow();
+                e.Handled = true;
+                break;
+        }
+    }
+
+    private void PreviewScrollViewer_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        if (_lastScannedImage == null)
+        {
+            return;
+        }
+
+        var factor = e.Delta > 0 ? ZoomStep : 1.0 / ZoomStep;
+        SetZoom(_zoom * factor);
+        e.Handled = true;
+    }
+
+    private void SetZoom(double zoom)
+    {
+        _zoom = Math.Clamp(zoom, MinZoom, MaxZoom);
+        ApplyZoom();
+    }
+
+    /// <summary>
+    /// Picks the largest zoom (capped at 100%) that lets the whole photo fit
+    /// inside the preview viewport, then applies it.
+    /// </summary>
+    private void FitToWindow()
+    {
+        if (_lastScannedImage == null)
+        {
+            return;
+        }
+
+        // Account for the image margin (10 on each side).
+        double viewW = PreviewScrollViewer.ActualWidth - 24;
+        double viewH = PreviewScrollViewer.ActualHeight - 24;
+
+        if (viewW <= 0 || viewH <= 0)
+        {
+            _zoom = 1.0;
+        }
+        else
+        {
+            double fit = Math.Min(viewW / _lastScannedImage.PixelWidth,
+                                  viewH / _lastScannedImage.PixelHeight);
+            _zoom = Math.Clamp(Math.Min(1.0, fit), MinZoom, MaxZoom);
+        }
+
+        ApplyZoom();
+    }
+
+    private void ApplyZoom()
+    {
+        if (_lastScannedImage == null)
+        {
+            return;
+        }
+
+        PreviewImage.Width = _lastScannedImage.PixelWidth * _zoom;
+        PreviewImage.Height = _lastScannedImage.PixelHeight * _zoom;
+        DimensionsText.Text =
+            $"Photo dimensions: {_lastScannedImage.PixelWidth} x {_lastScannedImage.PixelHeight} pixels  ·  Zoom {_zoom:P0}";
     }
 }
