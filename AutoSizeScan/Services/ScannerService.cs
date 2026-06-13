@@ -1,6 +1,9 @@
 using System.Runtime.InteropServices;
 using System.Windows.Media.Imaging;
 using System.IO;
+using System.Net;
+using System.Net.Sockets;
+using System.Text.RegularExpressions;
 using AutoSizeScan.Models;
 
 namespace AutoSizeScan.Services;
@@ -124,10 +127,21 @@ public class ScannerService
                 return "not found";
             }
 
-            // Connect() alone uses cached registry data for network devices, so we
-            // must read a property that the driver refreshes from the hardware.
+            // Connect() uses cached registry data, so it succeeds even for an
+            // unplugged network scanner. Some drivers (e.g. Brother) also return
+            // cached values for status properties, so a property read isn't a
+            // reliable signal either.
             scanner = targetInfo.Connect();
 
+            // For network scanners we can find an IP in the WIA properties; the
+            // most reliable test is whether that host actually responds.
+            var ip = ExtractIpAddress(targetInfo, scanner);
+            if (ip != null)
+            {
+                return IsHostReachable(ip) ? null : "not reachable";
+            }
+
+            // No IP exposed (USB / WSD): fall back to a live hardware-poll property.
             if (TryReadLiveProperty(scanner))
             {
                 return null; // reachable
@@ -175,6 +189,109 @@ public class ScannerService
             }
         }
         return false;
+    }
+
+    private static readonly Regex Ipv4Regex = new(@"\b(?:\d{1,3}\.){3}\d{1,3}\b", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Scans the device's WIA property values for an IPv4 address. Network
+    /// scanners typically expose their address in a port/connection property.
+    /// Returns null for USB/WSD devices that have no routable IP.
+    /// </summary>
+    private string? ExtractIpAddress(dynamic? deviceInfo, dynamic? scanner)
+    {
+        var candidates = new List<string>();
+        CollectPropertyStrings(deviceInfo != null ? deviceInfo.Properties : null, candidates);
+        CollectPropertyStrings(scanner != null ? scanner.Properties : null, candidates);
+
+        foreach (var text in candidates)
+        {
+            foreach (Match match in Ipv4Regex.Matches(text))
+            {
+                var ip = match.Value;
+                if (IPAddress.TryParse(ip, out var addr)
+                    && !IPAddress.IsLoopback(addr)
+                    && ip != "0.0.0.0")
+                {
+                    return ip;
+                }
+            }
+        }
+        return null;
+    }
+
+    private void CollectPropertyStrings(dynamic? properties, List<string> sink)
+    {
+        if (properties == null) return;
+        try
+        {
+            foreach (dynamic prop in properties)
+            {
+                try
+                {
+                    var value = prop.Value;
+                    if (value != null) sink.Add(value.ToString());
+                }
+                catch
+                {
+                    // Some properties throw on read; ignore them.
+                }
+            }
+        }
+        catch
+        {
+            // Property collection not enumerable; ignore.
+        }
+    }
+
+    /// <summary>
+    /// Returns true if the host responds on the network. A successful connection
+    /// OR an active "connection refused" both prove the host is alive; only a
+    /// timeout / no-route means unreachable. Common scanner/MFD ports are tried.
+    /// </summary>
+    private bool IsHostReachable(string ip)
+    {
+        int[] ports = { 54921, 9100, 515, 80, 443 }; // Brother scan, raw print, LPD, http(s)
+        var tasks = ports.Select(port => TryConnectAsync(ip, port)).ToList();
+
+        while (tasks.Count > 0)
+        {
+            var index = Task.WaitAny(tasks.ToArray());
+            var finished = tasks[index];
+            if (finished.Status == TaskStatus.RanToCompletion && finished.Result)
+            {
+                return true;
+            }
+            tasks.RemoveAt(index);
+        }
+        return false;
+    }
+
+    private static async Task<bool> TryConnectAsync(string ip, int port)
+    {
+        try
+        {
+            using var client = new TcpClient();
+            var connectTask = client.ConnectAsync(ip, port);
+            var completed = await Task.WhenAny(connectTask, Task.Delay(TimeSpan.FromMilliseconds(1500)));
+
+            if (completed != connectTask)
+            {
+                return false; // timed out on this port
+            }
+
+            await connectTask; // observe any exception
+            return client.Connected;
+        }
+        catch (SocketException ex)
+        {
+            // The host actively rejected the port, which still proves it is online.
+            return ex.SocketErrorCode == SocketError.ConnectionRefused;
+        }
+        catch
+        {
+            return false;
+        }
     }
     
     public bool IsScannerInUse(string scannerName)

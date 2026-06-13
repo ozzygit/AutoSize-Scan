@@ -28,7 +28,7 @@
         </StackPanel>
 
         <!-- Scan Button -->
-        <Button x:Name="ScanButton" Grid.Row="1" Content="Scan Document" Width="150" Height="40" 
+        <Button x:Name="ScanButton" Grid.Row="1" Content="Scan" Width="150" Height="40" 
                 HorizontalAlignment="Left" Click="ScanButton_Click" Margin="0,0,0,20"/>
 
         <!-- Preview Image -->
