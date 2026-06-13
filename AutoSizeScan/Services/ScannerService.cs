@@ -418,7 +418,7 @@ public class ScannerService
         }, cancellationToken);
     }
 
-    public void SaveImage(BitmapImage image, string outputPath, string format = "jpg")
+    public void SaveImage(BitmapSource image, string outputPath, string format = "jpg")
     {
         try
         {

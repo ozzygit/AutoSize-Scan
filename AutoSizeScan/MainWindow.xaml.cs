@@ -14,7 +14,7 @@ namespace AutoSizeScan;
 public partial class MainWindow : Window
 {
     private readonly ScannerService _scannerService;
-    private BitmapImage? _lastScannedImage;
+    private BitmapSource? _lastScannedImage;
     
     public MainWindow()
     {
@@ -96,11 +96,14 @@ public partial class MainWindow : Window
             var scannerName = ScannerComboBox.SelectedItem.ToString()!;
             var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60)); // 60 second timeout
             
-            var (image, width, height) = await _scannerService.ScanDocumentAsync(scannerName, cts.Token);
+            var (image, _, _) = await _scannerService.ScanDocumentAsync(scannerName, cts.Token);
             
-            _lastScannedImage = image;
-            PreviewImage.Source = image;
-            DimensionsText.Text = $"Scanned dimensions: {width} x {height} pixels";
+            // Auto-crop the empty bed area around the photo.
+            var cropped = ImageProcessor.AutoCropToContent(image, out var cropW, out var cropH);
+            
+            _lastScannedImage = cropped;
+            PreviewImage.Source = cropped;
+            DimensionsText.Text = $"Photo dimensions: {cropW} x {cropH} pixels";
             StatusText.Text = "Scan complete - click Save to store the photo";
             SaveButton.IsEnabled = true;
         }
