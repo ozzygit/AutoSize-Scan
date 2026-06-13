@@ -27,9 +27,13 @@
             </ComboBox>
         </StackPanel>
 
-        <!-- Scan Button -->
-        <Button x:Name="ScanButton" Grid.Row="1" Content="Scan" Width="150" Height="40" 
-                HorizontalAlignment="Left" Click="ScanButton_Click" Margin="0,0,0,20"/>
+        <!-- Action Buttons -->
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,20">
+            <Button x:Name="ScanButton" Content="Scan" Width="150" Height="40" 
+                    Click="ScanButton_Click"/>
+            <Button x:Name="SaveButton" Content="Save..." Width="150" Height="40" 
+                    Click="SaveButton_Click" IsEnabled="False" Margin="10,0,0,0"/>
+        </StackPanel>
 
         <!-- Preview Image -->
         <Border Grid.Row="2" BorderBrush="#DDD" BorderThickness="1" Background="#F5F5F5">
