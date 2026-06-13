@@ -18,6 +18,17 @@ public class ScannerService
     private const string WIA_DPA_CONNECT_STATUS = "1011";
     private const string WIA_DPS_DOCUMENT_HANDLING_STATUS = "3087";
 
+    // WIA item (scan) property IDs that define the scan area and resolution.
+    private const int WIA_IPS_XRES = 6147;     // Horizontal resolution (DPI)
+    private const int WIA_IPS_YRES = 6148;     // Vertical resolution (DPI)
+    private const int WIA_IPS_XEXTENT = 6149;  // Width of scan region (pixels)
+    private const int WIA_IPS_YEXTENT = 6150;  // Height of scan region (pixels)
+    private const int WIA_IPS_XPOS = 6151;     // Left start of scan region (pixels)
+    private const int WIA_IPS_YPOS = 6152;     // Top start of scan region (pixels)
+
+    // Resolution used for scans. Photo-friendly default; change here if needed.
+    private const int DefaultScanDpi = 300;
+
     // Per-scanner time budget for the live communication probe.
     private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(4);
 
@@ -42,6 +53,10 @@ public class ScannerService
                 }
 
                 deviceManager = Activator.CreateInstance(deviceManagerType);
+                if (deviceManager == null)
+                {
+                    throw new Exception("WIA Device Manager not available");
+                }
 
                 foreach (dynamic deviceInfo in deviceManager.DeviceInfos)
                 {
@@ -107,6 +122,10 @@ public class ScannerService
             }
 
             deviceManager = Activator.CreateInstance(deviceManagerType);
+            if (deviceManager == null)
+            {
+                return "WIA unavailable";
+            }
 
             dynamic? targetInfo = null;
             foreach (dynamic deviceInfo in deviceManager.DeviceInfos)
@@ -311,6 +330,10 @@ public class ScannerService
             }
             
             deviceManager = Activator.CreateInstance(deviceManagerType);
+            if (deviceManager == null)
+            {
+                return false;
+            }
             
             foreach (dynamic deviceInfo in deviceManager.DeviceInfos)
             {
@@ -368,6 +391,10 @@ public class ScannerService
                 }
                 
                 deviceManager = Activator.CreateInstance(deviceManagerType);
+                if (deviceManager == null)
+                {
+                    throw new Exception("WIA Device Manager not available");
+                }
                 
                 foreach (dynamic deviceInfo in deviceManager.DeviceInfos)
                 {
@@ -388,6 +415,7 @@ public class ScannerService
                 }
                 
                 dynamic item = scanner.Items[1];
+                ConfigureFullBedScan(item);
                 dynamic imageFile = item.Transfer(WIA_FORMAT_JPEG);
                 
                 var tempPath = Path.Combine(Path.GetTempPath(), $"scan_{Guid.NewGuid()}.jpg");
@@ -419,6 +447,98 @@ public class ScannerService
                 if (deviceManager != null) Marshal.ReleaseComObject(deviceManager);
             }
         }, cancellationToken);
+    }
+
+    /// <summary>
+    /// Forces the scan to capture the full flatbed at a known resolution.
+    /// Without this, WIA reuses whatever item defaults the driver currently
+    /// holds, which on some devices is a small extent (or a leftover high-DPI
+    /// setting) and produces a zoomed-in partial scan of the top-left corner.
+    /// Each property is set defensively so drivers (e.g. some WSD devices) that
+    /// don't expose a given property are simply skipped.
+    /// </summary>
+    private static void ConfigureFullBedScan(dynamic item)
+    {
+        dynamic properties = item.Properties;
+
+        // Resolution first: the driver rescales the extent maxima to match.
+        TrySetWiaProperty(properties, WIA_IPS_XRES, DefaultScanDpi);
+        TrySetWiaProperty(properties, WIA_IPS_YRES, DefaultScanDpi);
+
+        // Origin at the top-left corner of the bed.
+        TrySetWiaProperty(properties, WIA_IPS_XPOS, 0);
+        TrySetWiaProperty(properties, WIA_IPS_YPOS, 0);
+
+        // Capture the whole bed by maxing out the extents at this resolution.
+        TrySetWiaPropertyToMax(properties, WIA_IPS_XEXTENT);
+        TrySetWiaPropertyToMax(properties, WIA_IPS_YEXTENT);
+    }
+
+    /// <summary>
+    /// Locates a WIA property in a collection by its numeric PropertyID.
+    /// Returns null when the property is not present.
+    /// </summary>
+    private static object? FindWiaProperty(dynamic properties, int propertyId)
+    {
+        foreach (dynamic prop in properties)
+        {
+            try
+            {
+                if ((int)prop.PropertyID == propertyId)
+                {
+                    return prop;
+                }
+            }
+            catch
+            {
+                // Property doesn't expose a readable ID; skip it.
+            }
+        }
+        return null;
+    }
+
+    private static void TrySetWiaProperty(dynamic properties, int propertyId, int value)
+    {
+        try
+        {
+            object? found = FindWiaProperty(properties, propertyId);
+            if (found == null)
+            {
+                return;
+            }
+
+            dynamic prop = found;
+            if (!prop.IsReadOnly)
+            {
+                prop.Value = value;
+            }
+        }
+        catch
+        {
+            // Driver rejected the value or doesn't support this property.
+        }
+    }
+
+    private static void TrySetWiaPropertyToMax(dynamic properties, int propertyId)
+    {
+        try
+        {
+            object? found = FindWiaProperty(properties, propertyId);
+            if (found == null)
+            {
+                return;
+            }
+
+            dynamic prop = found;
+            if (!prop.IsReadOnly)
+            {
+                prop.Value = prop.SubTypeMax;
+            }
+        }
+        catch
+        {
+            // Driver rejected the value or doesn't support this property.
+        }
     }
 
     public void SaveImage(BitmapSource image, string outputPath, string format = "jpg")

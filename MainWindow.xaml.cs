@@ -37,6 +37,7 @@ public partial class MainWindow : Window
         {
             StatusText.Text = "Detecting scanners...";
             ScanButton.IsEnabled = false;
+            RefreshButton.IsEnabled = false;
 
             var scanners = await _scannerService.GetAvailableScannersAsync();
             ScannerComboBox.ItemsSource = scanners;
@@ -68,6 +69,15 @@ public partial class MainWindow : Window
             StatusText.Text = $"Error loading scanners: {ex.Message}";
             ScanButton.IsEnabled = false;
         }
+        finally
+        {
+            RefreshButton.IsEnabled = true;
+        }
+    }
+
+    private async void RefreshButton_Click(object sender, RoutedEventArgs e)
+    {
+        await LoadScannersAsync();
     }
     
     private void ScannerComboBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
