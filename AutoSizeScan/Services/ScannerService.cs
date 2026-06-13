@@ -251,7 +251,10 @@ public class ScannerService
     /// </summary>
     private bool IsHostReachable(string ip)
     {
-        int[] ports = { 54921, 9100, 515, 80, 443 }; // Brother scan, raw print, LPD, http(s)
+        // Brother scan, raw print, LPD, http(s), and WSD device-host (WSDAPI)
+        // ports. 5357/5358 cover WSD scanners, which expose an IP but do not
+        // listen on the print/scan ports above.
+        int[] ports = { 54921, 9100, 515, 80, 443, 5357, 5358 };
         var tasks = ports.Select(port => TryConnectAsync(ip, port)).ToList();
 
         while (tasks.Count > 0)

@@ -15,6 +15,7 @@ public partial class MainWindow : Window
 {
     private readonly ScannerService _scannerService;
     private BitmapSource? _lastScannedImage;
+    private bool _hasUnsavedScan;
     
     public MainWindow()
     {
@@ -87,7 +88,25 @@ public partial class MainWindow : Window
             StatusText.Text = "Please select a scanner";
             return;
         }
-        
+
+        // Warn before discarding an unsaved scan.
+        if (_hasUnsavedScan)
+        {
+            var choice = MessageBox.Show(
+                "You have a scan that hasn't been saved. Discard it and start a new scan?",
+                "Discard last scan?",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning);
+
+            if (choice != MessageBoxResult.Yes)
+            {
+                return;
+            }
+        }
+
+        // Clear the canvas before the new scan starts.
+        ClearScan();
+
         try
         {
             StatusText.Text = "Scanning...";
@@ -102,6 +121,7 @@ public partial class MainWindow : Window
             var cropped = ImageProcessor.AutoCropToContent(image, out var cropW, out var cropH);
             
             _lastScannedImage = cropped;
+            _hasUnsavedScan = true;
             PreviewImage.Source = cropped;
             DimensionsText.Text = $"Photo dimensions: {cropW} x {cropH} pixels";
             StatusText.Text = "Scan complete - click Save to store the photo";
@@ -153,11 +173,21 @@ public partial class MainWindow : Window
             }
 
             _scannerService.SaveImage(_lastScannedImage, dialog.FileName, format);
+            _hasUnsavedScan = false;
             StatusText.Text = $"Saved to {dialog.FileName}";
         }
         catch (Exception ex)
         {
             StatusText.Text = $"Save failed: {ex.Message}";
         }
+    }
+
+    private void ClearScan()
+    {
+        _lastScannedImage = null;
+        _hasUnsavedScan = false;
+        PreviewImage.Source = null;
+        DimensionsText.Text = string.Empty;
+        SaveButton.IsEnabled = false;
     }
 }

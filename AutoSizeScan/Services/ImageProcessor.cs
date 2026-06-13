@@ -5,21 +5,25 @@ namespace AutoSizeScan.Services;
 
 public static class ImageProcessor
 {
-    // A pixel counts as "content" if any channel differs from the sampled
-    // background by more than this amount (0-255). Absorbs JPEG noise/dust.
-    private const int ColorTolerance = 28;
+    // Local luminance change (0-255) needed for a pixel to count as an "edge".
+    // Photo texture clears this easily; smooth bed/lid background does not.
+    private const int EdgeThreshold = 22;
 
-    // A row/column is part of the photo only if at least this fraction of its
-    // pixels are content. Ignores stray specks and thin streaks.
-    private const double MinContentFraction = 0.01;
+    // A row/column belongs to the photo only if at least this fraction of its
+    // pixels are edges. Ignores sensor noise, dust and faint vignette gradients.
+    private const double MinEdgeFraction = 0.012;
 
-    // Extra pixels kept around the detected photo edges.
-    private const int MarginPixels = 6;
+    // Extra pixels kept around the detected photo edges. Zero keeps the crop
+    // tight to the photo so no background band is re-added.
+    private const int MarginPixels = 0;
 
     /// <summary>
-    /// Detects the photo within a full-bed scan (against a near-uniform
-    /// background) and returns a cropped image. Falls back to the original
-    /// image if no meaningful content region is found.
+    /// Detects the photo within a full-bed scan and returns a cropped image.
+    /// Works by locating textured (high-detail) rows/columns rather than by
+    /// matching a background color, so it ignores any smooth background band
+    /// regardless of its shade (white lid backing, vignette, shadow halo,
+    /// dark bed edges). Falls back to the original image if no photo region
+    /// is found.
     /// </summary>
     public static BitmapSource AutoCropToContent(BitmapSource source, out int width, out int height)
     {
@@ -34,39 +38,51 @@ public static class ImageProcessor
         var pixels = new byte[h * stride];
         bgra.CopyPixels(pixels, stride, 0);
 
-        // Estimate the background from the four corners (always empty bed).
-        var (bgB, bgG, bgR) = SampleBackground(pixels, w, h, stride);
-
-        int minContentPerRow = Math.Max(3, (int)(w * MinContentFraction));
-        int minContentPerCol = Math.Max(3, (int)(h * MinContentFraction));
-
-        var rowContent = new int[h];
-        var colContent = new int[w];
-
+        // Precompute per-pixel luminance (Rec. 601).
+        var lum = new byte[w * h];
         for (int y = 0; y < h; y++)
         {
             int rowOffset = y * stride;
+            int lumRow = y * w;
             for (int x = 0; x < w; x++)
             {
                 int i = rowOffset + x * 4;
-                int db = Math.Abs(pixels[i] - bgB);
-                int dg = Math.Abs(pixels[i + 1] - bgG);
-                int dr = Math.Abs(pixels[i + 2] - bgR);
+                lum[lumRow + x] = (byte)((pixels[i + 2] * 77 + pixels[i + 1] * 150 + pixels[i] * 29) >> 8);
+            }
+        }
 
-                if (db > ColorTolerance || dg > ColorTolerance || dr > ColorTolerance)
+        int minEdgePerRow = Math.Max(3, (int)(w * MinEdgeFraction));
+        int minEdgePerCol = Math.Max(3, (int)(h * MinEdgeFraction));
+
+        var rowEdges = new int[h];
+        var colEdges = new int[w];
+
+        // A pixel is an "edge" when its luminance differs sharply from the
+        // neighbour to the left or above. Smooth background bands stay near 0.
+        for (int y = 1; y < h; y++)
+        {
+            int lumRow = y * w;
+            int lumRowAbove = (y - 1) * w;
+            for (int x = 1; x < w; x++)
+            {
+                int c = lum[lumRow + x];
+                int gx = Math.Abs(c - lum[lumRow + x - 1]);
+                int gy = Math.Abs(c - lum[lumRowAbove + x]);
+
+                if (gx > EdgeThreshold || gy > EdgeThreshold)
                 {
-                    rowContent[y]++;
-                    colContent[x]++;
+                    rowEdges[y]++;
+                    colEdges[x]++;
                 }
             }
         }
 
-        int top = FirstIndexAtLeast(rowContent, minContentPerRow, forward: true);
-        int bottom = FirstIndexAtLeast(rowContent, minContentPerRow, forward: false);
-        int left = FirstIndexAtLeast(colContent, minContentPerCol, forward: true);
-        int right = FirstIndexAtLeast(colContent, minContentPerCol, forward: false);
+        int top = FirstIndexAtLeast(rowEdges, minEdgePerRow, forward: true);
+        int bottom = FirstIndexAtLeast(rowEdges, minEdgePerRow, forward: false);
+        int left = FirstIndexAtLeast(colEdges, minEdgePerCol, forward: true);
+        int right = FirstIndexAtLeast(colEdges, minEdgePerCol, forward: false);
 
-        // No content detected -> keep the original.
+        // No textured region detected -> keep the original.
         if (top < 0 || bottom < 0 || left < 0 || right < 0 || bottom <= top || right <= left)
         {
             width = w;
@@ -97,37 +113,6 @@ public static class ImageProcessor
         width = cropW;
         height = cropH;
         return cropped;
-    }
-
-    private static (int b, int g, int r) SampleBackground(byte[] pixels, int w, int h, int stride)
-    {
-        // Average a small block in each corner.
-        const int block = 8;
-        long sumB = 0, sumG = 0, sumR = 0;
-        int count = 0;
-
-        void Accumulate(int startX, int startY)
-        {
-            for (int y = startY; y < startY + block && y < h; y++)
-            {
-                for (int x = startX; x < startX + block && x < w; x++)
-                {
-                    int i = y * stride + x * 4;
-                    sumB += pixels[i];
-                    sumG += pixels[i + 1];
-                    sumR += pixels[i + 2];
-                    count++;
-                }
-            }
-        }
-
-        Accumulate(0, 0);
-        Accumulate(Math.Max(0, w - block), 0);
-        Accumulate(0, Math.Max(0, h - block));
-        Accumulate(Math.Max(0, w - block), Math.Max(0, h - block));
-
-        if (count == 0) return (255, 255, 255);
-        return ((int)(sumB / count), (int)(sumG / count), (int)(sumR / count));
     }
 
     private static int FirstIndexAtLeast(int[] counts, int threshold, bool forward)
