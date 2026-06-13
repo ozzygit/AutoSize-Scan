@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Windows.Media.Imaging;
 using System.IO;
+using AutoSizeScan.Models;
 
 namespace AutoSizeScan.Services;
 
@@ -9,71 +10,171 @@ public class ScannerService
     private const string WIA_DEVICE_MANAGER = "WIA.DeviceManager";
     private const string WIA_DEVICE_TYPE_SCANNER = "1";
     private const string WIA_FORMAT_JPEG = "{B96B3CAE-0728-11D3-9D7B-0000F81EF32E}";
-    
-    public List<string> GetAvailableScanners()
+
+    // WIA properties whose read forces the minidriver to poll the physical hardware.
+    private const string WIA_DPA_CONNECT_STATUS = "1011";
+    private const string WIA_DPS_DOCUMENT_HANDLING_STATUS = "3087";
+
+    // Per-scanner time budget for the live communication probe.
+    private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(4);
+
+    /// <summary>
+    /// Enumerates all OS-registered scanners and tags each with whether it can
+    /// actually be reached via a live WIA hardware poll. Unreachable devices are
+    /// returned too (so the UI can show them disabled), but flagged accordingly.
+    /// </summary>
+    public async Task<List<ScannerDevice>> GetAvailableScannersAsync()
     {
-        var scanners = new List<string>();
-        
+        // Collect names first (cheap, cached metadata only).
+        var names = await Task.Run(() =>
+        {
+            var found = new List<string>();
+            dynamic? deviceManager = null;
+            try
+            {
+                var deviceManagerType = Type.GetTypeFromProgID(WIA_DEVICE_MANAGER);
+                if (deviceManagerType == null)
+                {
+                    throw new Exception("WIA Device Manager not available");
+                }
+
+                deviceManager = Activator.CreateInstance(deviceManagerType);
+
+                foreach (dynamic deviceInfo in deviceManager.DeviceInfos)
+                {
+                    if (deviceInfo.Type.ToString() == WIA_DEVICE_TYPE_SCANNER)
+                    {
+                        dynamic nameProperty = deviceInfo.Properties["Name"];
+                        found.Add(nameProperty.Value.ToString());
+                    }
+                }
+            }
+            finally
+            {
+                if (deviceManager != null) Marshal.ReleaseComObject(deviceManager);
+            }
+            return found;
+        });
+
+        // Probe each scanner in parallel so total wait stays ~ProbeTimeout.
+        var probeTasks = names.Select(ProbeScannerAsync).ToList();
+        var results = await Task.WhenAll(probeTasks);
+        return results.ToList();
+    }
+
+    private async Task<ScannerDevice> ProbeScannerAsync(string scannerName)
+    {
+        var device = new ScannerDevice { Name = scannerName };
+
+        var probe = Task.Run(() => ProbeDeviceCommunication(scannerName));
+        var completed = await Task.WhenAny(probe, Task.Delay(ProbeTimeout));
+
+        if (completed == probe && probe.Status == TaskStatus.RanToCompletion)
+        {
+            var reason = probe.Result;
+            device.IsReachable = reason == null;
+            device.StatusReason = reason;
+        }
+        else
+        {
+            // Timed out (likely waiting on an unreachable network device) or faulted.
+            device.IsReachable = false;
+            device.StatusReason = "not reachable";
+        }
+
+        return device;
+    }
+
+    /// <summary>
+    /// Connects to the named scanner and reads a property that forces a live
+    /// hardware poll. Returns null when the device is reachable, otherwise a
+    /// short reason string describing why it is not.
+    /// </summary>
+    private string? ProbeDeviceCommunication(string scannerName)
+    {
+        dynamic? scanner = null;
+        dynamic? deviceManager = null;
+
         try
         {
             var deviceManagerType = Type.GetTypeFromProgID(WIA_DEVICE_MANAGER);
             if (deviceManagerType == null)
             {
-                throw new Exception("WIA Device Manager not available");
+                return "WIA unavailable";
             }
-            
-            dynamic deviceManager = Activator.CreateInstance(deviceManagerType);
-            
+
+            deviceManager = Activator.CreateInstance(deviceManagerType);
+
+            dynamic? targetInfo = null;
             foreach (dynamic deviceInfo in deviceManager.DeviceInfos)
             {
                 if (deviceInfo.Type.ToString() == WIA_DEVICE_TYPE_SCANNER)
                 {
                     dynamic nameProperty = deviceInfo.Properties["Name"];
-                    var scannerName = nameProperty.Value.ToString();
-                    
-                    // Test if we can actually communicate with this scanner
-                    if (TestScannerConnection(deviceInfo))
+                    if (nameProperty.Value.ToString() == scannerName)
                     {
-                        scanners.Add(scannerName);
+                        targetInfo = deviceInfo;
+                        break;
                     }
                 }
             }
-            
-            Marshal.ReleaseComObject(deviceManager);
+
+            if (targetInfo == null)
+            {
+                return "not found";
+            }
+
+            // Connect() alone uses cached registry data for network devices, so we
+            // must read a property that the driver refreshes from the hardware.
+            scanner = targetInfo.Connect();
+
+            if (TryReadLiveProperty(scanner))
+            {
+                return null; // reachable
+            }
+
+            return "not reachable";
         }
-        catch (Exception ex)
+        catch (COMException ex)
         {
-            throw new Exception("Error enumerating scanners: " + ex.Message, ex);
-        }
-        
-        return scanners;
-    }
-    
-    private bool TestScannerConnection(dynamic deviceInfo)
-    {
-        dynamic? scanner = null;
-        
-        try
-        {
-            scanner = deviceInfo.Connect();
-            
-            // Try to access the scanner's items to verify it can actually perform operations
-            dynamic item = scanner.Items[1];
-            
-            // Try to get properties to ensure the scanner is responsive
-            dynamic properties = item.Properties;
-            
-            return true;
+            if (ex.ErrorCode == unchecked((int)0x80210015))
+            {
+                return "in use";
+            }
+            return "not reachable";
         }
         catch (Exception)
         {
-            // Cannot connect or access items - scanner may be in use, offline, or driver issues
-            return false;
+            return "not reachable";
         }
         finally
         {
             if (scanner != null) Marshal.ReleaseComObject(scanner);
+            if (deviceManager != null) Marshal.ReleaseComObject(deviceManager);
         }
+    }
+
+    /// <summary>
+    /// Reads a device property that requires a live hardware poll. Tries
+    /// WIA_DPA_CONNECT_STATUS first, then WIA_DPS_DOCUMENT_HANDLING_STATUS.
+    /// </summary>
+    private bool TryReadLiveProperty(dynamic scanner)
+    {
+        foreach (var propId in new[] { WIA_DPA_CONNECT_STATUS, WIA_DPS_DOCUMENT_HANDLING_STATUS })
+        {
+            try
+            {
+                dynamic prop = scanner.Properties[propId];
+                // Accessing .Value triggers the driver to poll the hardware.
+                var _ = prop.Value;
+                return true;
+            }
+            catch
+            {
+                // Property not implemented by this driver; try the next one.
+            }
+        }
+        return false;
     }
     
     public bool IsScannerInUse(string scannerName)
