@@ -1,6 +1,7 @@
 ﻿using System.Windows;
 using AutoSizeScan.Services;
 using System.IO;
+using System.Runtime.InteropServices;
 
 namespace AutoSizeScan;
 
@@ -28,11 +29,11 @@ public partial class MainWindow : Window
             if (scanners.Count > 0)
             {
                 ScannerComboBox.SelectedIndex = 0;
-                StatusText.Text = $"Found {scanners.Count} scanner(s)";
+                StatusText.Text = $"Found {scanners.Count} communicable scanner(s)";
             }
             else
             {
-                StatusText.Text = "No scanners found";
+                StatusText.Text = "No communicable scanners found";
                 ScanButton.IsEnabled = false;
             }
         }
@@ -43,7 +44,34 @@ public partial class MainWindow : Window
         }
     }
     
-    private void ScanButton_Click(object sender, RoutedEventArgs e)
+    private void ScannerComboBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (ScannerComboBox.SelectedItem == null)
+        {
+            return;
+        }
+        
+        var scannerName = ScannerComboBox.SelectedItem.ToString()!;
+        
+        // Check if scanner is in use by another application
+        if (_scannerService.IsScannerInUse(scannerName))
+        {
+            MessageBox.Show(
+                "This scanner is currently in use by another application. Please close the other application or wait for it to finish.",
+                "Scanner In Use",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning
+            );
+            ScanButton.IsEnabled = false;
+        }
+        else
+        {
+            ScanButton.IsEnabled = true;
+            StatusText.Text = $"Selected: {scannerName}";
+        }
+    }
+    
+    private async void ScanButton_Click(object sender, RoutedEventArgs e)
     {
         if (ScannerComboBox.SelectedItem == null)
         {
@@ -57,7 +85,9 @@ public partial class MainWindow : Window
             ScanButton.IsEnabled = false;
             
             var scannerName = ScannerComboBox.SelectedItem.ToString()!;
-            var (image, width, height) = _scannerService.ScanDocument(scannerName);
+            var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60)); // 60 second timeout
+            
+            var (image, width, height) = await _scannerService.ScanDocumentAsync(scannerName, cts.Token);
             
             PreviewImage.Source = image;
             DimensionsText.Text = $"Scanned dimensions: {width} x {height} pixels";
@@ -70,6 +100,10 @@ public partial class MainWindow : Window
             
             _scannerService.SaveImage(image, savePath);
             StatusText.Text = $"Scan complete - Saved to {Path.GetFileName(savePath)}";
+        }
+        catch (OperationCanceledException)
+        {
+            StatusText.Text = "Scan timed out - scanner may not be responding";
         }
         catch (Exception ex)
         {
