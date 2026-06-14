@@ -7,15 +7,18 @@ public static class ImageProcessor
 {
     // Local luminance change (0-255) needed for a pixel to count as an "edge".
     // Photo texture clears this easily; smooth bed/lid background does not.
-    private const int EdgeThreshold = 22;
+    // TROUBLESHOOTING: Lowered from 22 → 15 → 10 to detect more edges and prevent cutting off photo content
+    private const int EdgeThreshold = 10;
 
     // A row/column belongs to the photo only if at least this fraction of its
     // pixels are edges. Ignores sensor noise, dust and faint vignette gradients.
-    private const double MinEdgeFraction = 0.012;
+    // TROUBLESHOOTING: Lowered from 0.012 → 0.008 → 0.005 to be more permissive with edge detection
+    private const double MinEdgeFraction = 0.005;
 
     // Extra pixels kept around the detected photo edges. Zero keeps the crop
     // tight to the photo so no background band is re-added.
-    private const int MarginPixels = 0;
+    // TROUBLESHOOTING: Increased from 0 → 10 → 50 to add large safety margin and prevent cutting off photo edges
+    private const int MarginPixels = 50;
 
     /// <summary>
     /// Detects the photo within a full-bed scan and returns a cropped image.

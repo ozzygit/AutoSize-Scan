@@ -30,7 +30,9 @@ public class ScannerService
     private const int DefaultScanDpi = 300;
 
     // Per-scanner time budget for the live communication probe.
-    private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(4);
+    // Increased from 4s to 10s to allow time for scanners to wake from sleep mode.
+    // The refresh button exists to re-probe after waking a sleeping scanner.
+    private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(10);
 
     /// <summary>
     /// Enumerates all OS-registered scanners and tags each with whether it can
@@ -150,7 +152,14 @@ public class ScannerService
             // unplugged network scanner. Some drivers (e.g. Brother) also return
             // cached values for status properties, so a property read isn't a
             // reliable signal either.
-            scanner = targetInfo.Connect();
+            try
+            {
+                scanner = targetInfo.Connect();
+            }
+            catch (COMException ex) when (ex.ErrorCode == unchecked((int)0x80210015))
+            {
+                return "in use";
+            }
 
             // For network scanners we can find an IP in the WIA properties; the
             // most reliable test is whether that host actually responds.
@@ -316,65 +325,6 @@ public class ScannerService
         }
     }
     
-    public bool IsScannerInUse(string scannerName)
-    {
-        dynamic? scanner = null;
-        dynamic? deviceManager = null;
-        
-        try
-        {
-            var deviceManagerType = Type.GetTypeFromProgID(WIA_DEVICE_MANAGER);
-            if (deviceManagerType == null)
-            {
-                return false;
-            }
-            
-            deviceManager = Activator.CreateInstance(deviceManagerType);
-            if (deviceManager == null)
-            {
-                return false;
-            }
-            
-            foreach (dynamic deviceInfo in deviceManager.DeviceInfos)
-            {
-                if (deviceInfo.Type.ToString() == WIA_DEVICE_TYPE_SCANNER)
-                {
-                    dynamic nameProperty = deviceInfo.Properties["Name"];
-                    if (nameProperty.Value.ToString() == scannerName)
-                    {
-                        try
-                        {
-                            scanner = deviceInfo.Connect();
-                            // If we can connect, it's not in use
-                            return false;
-                        }
-                        catch (COMException ex)
-                        {
-                            // Check for specific error codes that indicate device in use
-                            // 0x80210015 = WIA_ERROR_DEVICE_BUSY
-                            if (ex.ErrorCode == unchecked((int)0x80210015))
-                            {
-                                return true;
-                            }
-                            return false;
-                        }
-                    }
-                }
-            }
-            
-            return false;
-        }
-        catch
-        {
-            return false;
-        }
-        finally
-        {
-            if (scanner != null) Marshal.ReleaseComObject(scanner);
-            if (deviceManager != null) Marshal.ReleaseComObject(deviceManager);
-        }
-    }
-
     public async Task<(BitmapImage image, int width, int height)> ScanDocumentAsync(string scannerName, CancellationToken cancellationToken = default)
     {
         return await Task.Run(() =>
@@ -415,23 +365,24 @@ public class ScannerService
                 }
                 
                 dynamic item = scanner.Items[1];
+
+                // Attempt 1: configure full-bed properties (correct for most scanners).
                 ConfigureFullBedScan(item);
-                dynamic imageFile = item.Transfer(WIA_FORMAT_JPEG);
-                
-                var tempPath = Path.Combine(Path.GetTempPath(), $"scan_{Guid.NewGuid()}.jpg");
-                imageFile.SaveFile(tempPath);
-                
-                var bitmap = new BitmapImage();
-                bitmap.BeginInit();
-                bitmap.CacheOption = BitmapCacheOption.OnLoad;
-                bitmap.UriSource = new Uri(tempPath);
-                bitmap.EndInit();
-                bitmap.Freeze();
-                
-                int width = bitmap.PixelWidth;
-                int height = bitmap.PixelHeight;
-                
-                return (bitmap, width, height);
+                BitmapImage bitmap = TransferToBitmap(item);
+
+                // Some drivers (e.g. Brother network scanners) silently ignore WIA property
+                // writes and scan using their own internal defaults, producing a tiny image
+                // that reflects the leftover extent rather than the full bed. Detect this by
+                // checking whether the shorter dimension is implausibly small: even 75 DPI
+                // on the shortest side of A4/Letter yields ~620 px, so 500 px is a safe floor.
+                if (Math.Min(bitmap.PixelWidth, bitmap.PixelHeight) < MinValidDimension)
+                {
+                    // Attempt 2: driver default — let the driver scan with its own settings.
+                    item = scanner.Items[1];
+                    bitmap = TransferToBitmap(item);
+                }
+
+                return (bitmap, bitmap.PixelWidth, bitmap.PixelHeight);
             }
             catch (COMException ex)
             {
@@ -447,6 +398,28 @@ public class ScannerService
                 if (deviceManager != null) Marshal.ReleaseComObject(deviceManager);
             }
         }, cancellationToken);
+    }
+
+    // If the shorter pixel dimension of a scan result is below this value we treat it
+    // as a driver-ignored-properties failure and retry with driver defaults.
+    private const int MinValidDimension = 500;
+
+    /// <summary>
+    /// Transfers a WIA item to a BitmapImage via a temp JPEG file.
+    /// </summary>
+    private static BitmapImage TransferToBitmap(dynamic item)
+    {
+        dynamic imageFile = item.Transfer(WIA_FORMAT_JPEG);
+        var tempPath = Path.Combine(Path.GetTempPath(), $"scan_{Guid.NewGuid()}.jpg");
+        imageFile.SaveFile(tempPath);
+
+        var bitmap = new BitmapImage();
+        bitmap.BeginInit();
+        bitmap.CacheOption = BitmapCacheOption.OnLoad;
+        bitmap.UriSource = new Uri(tempPath);
+        bitmap.EndInit();
+        bitmap.Freeze();
+        return bitmap;
     }
 
     /// <summary>

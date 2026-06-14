@@ -4,7 +4,6 @@ using System.Windows.Media.Imaging;
 using AutoSizeScan.Services;
 using AutoSizeScan.Models;
 using System.IO;
-using System.Runtime.InteropServices;
 using Microsoft.Win32;
 
 namespace AutoSizeScan;
@@ -90,7 +89,9 @@ public partial class MainWindow : Window
         if (!scanner.IsReachable)
         {
             ScanButton.IsEnabled = false;
-            StatusText.Text = $"{scanner.Name} is {scanner.StatusReason ?? "not reachable"}";
+            StatusText.Text = scanner.StatusReason == "in use"
+                ? $"{scanner.Name} is in use by another app — close it and click Refresh"
+                : $"{scanner.Name} is {scanner.StatusReason ?? "not reachable"}";
             return;
         }
 
@@ -133,10 +134,19 @@ public partial class MainWindow : Window
             var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60)); // 60 second timeout
             
             var (image, _, _) = await _scannerService.ScanDocumentAsync(scannerName, cts.Token);
-            
+
             // Auto-crop the empty bed area around the photo.
             var cropped = ImageProcessor.AutoCropToContent(image, out var cropW, out var cropH);
-            
+
+            // TROUBLESHOOTING: Added validation to prevent displaying invalid/blank images
+            // This catches cases where auto-crop might produce invalid dimensions
+            if (cropped.PixelWidth <= 0 || cropped.PixelHeight <= 0)
+            {
+                StatusText.Text = "Scan produced invalid image - try scanning again";
+                ClearScan();
+                return;
+            }
+
             _lastScannedImage = cropped;
             _hasUnsavedScan = true;
             PreviewImage.Source = cropped;

@@ -8,7 +8,9 @@ public class ScannerDevice
 
     public string DisplayName => IsReachable
         ? Name
-        : $"{Name}  ({StatusReason ?? "not reachable"})";
+        : StatusReason == "in use"
+            ? $"{Name}  (in use by another app)"
+            : $"{Name}  ({StatusReason ?? "not reachable"})";
 
     public override string ToString() => Name;
 }
