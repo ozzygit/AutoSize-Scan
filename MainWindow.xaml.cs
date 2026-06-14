@@ -5,6 +5,7 @@ using AutoSizeScan.Services;
 using AutoSizeScan.Models;
 using System.IO;
 using Microsoft.Win32;
+using System.Reflection;
 
 namespace AutoSizeScan;
 
@@ -15,6 +16,7 @@ public partial class MainWindow : Window
 {
     private readonly ScannerService _scannerService;
     private BitmapSource? _lastScannedImage;
+    private (int Width, int Height)? _lastRawSize;
     private bool _hasUnsavedScan;
 
     // Preview zoom state.
@@ -27,6 +29,7 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         _scannerService = new ScannerService();
+        BuildInfoText.Text = BuildInfoHelper();
         Loaded += async (_, _) => await LoadScannersAsync();
     }
     
@@ -127,18 +130,20 @@ public partial class MainWindow : Window
 
         try
         {
-            StatusText.Text = "Scanning...";
+            StatusText.Text = "Scanning (full bed attempt)...";
             ScanButton.IsEnabled = false;
             
             var scannerName = ScannerComboBox.SelectedItem.ToString()!;
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
             
-            var (image, _, _) = await _scannerService.ScanDocumentAsync(scannerName, cts.Token);
+            var progress = new Progress<string>(message => StatusText.Text = message);
+            var (image, rawWidth, rawHeight) = await _scannerService.ScanDocumentAsync(scannerName, cts.Token, progress);
 
             // Auto-crop the empty bed area around the photo.
             var cropped = ImageProcessor.AutoCropToContent(image);
 
             _lastScannedImage = cropped;
+            _lastRawSize = (rawWidth, rawHeight);
             _hasUnsavedScan = true;
             PreviewImage.Source = cropped;
             FitToWindow();
@@ -203,6 +208,7 @@ public partial class MainWindow : Window
     private void ClearScan()
     {
         _lastScannedImage = null;
+        _lastRawSize = null;
         _hasUnsavedScan = false;
         PreviewImage.Source = null;
         PreviewImage.Width = double.NaN;
@@ -297,7 +303,28 @@ public partial class MainWindow : Window
 
         PreviewImage.Width = _lastScannedImage.PixelWidth * _zoom;
         PreviewImage.Height = _lastScannedImage.PixelHeight * _zoom;
+
+        string rawSuffix = _lastRawSize.HasValue
+            ? $" (raw {_lastRawSize.Value.Width} x {_lastRawSize.Value.Height})"
+            : string.Empty;
+
         DimensionsText.Text =
-            $"Photo dimensions: {_lastScannedImage.PixelWidth} x {_lastScannedImage.PixelHeight} pixels  ·  Zoom {_zoom:P0}";
+            $"Photo dimensions: {_lastScannedImage.PixelWidth} x {_lastScannedImage.PixelHeight} pixels{rawSuffix}  ·  Zoom {_zoom:P0}";
+    }
+
+    private static string BuildInfoHelper()
+    {
+        try
+        {
+            var assembly = Assembly.GetExecutingAssembly();
+            var version = assembly.GetName().Version;
+            var timestamp = File.GetLastWriteTime(assembly.Location);
+            var versionString = version != null ? version.ToString(3) : "?";
+            return $"Build {versionString} · {timestamp:yyyy-MM-dd HH:mm}";
+        }
+        catch
+        {
+            return "Build unknown";
+        }
     }
 }

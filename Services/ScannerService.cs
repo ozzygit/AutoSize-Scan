@@ -1,8 +1,11 @@
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Windows.Media.Imaging;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 using System.Text.RegularExpressions;
 using AutoSizeScan.Models;
 
@@ -10,6 +13,13 @@ namespace AutoSizeScan.Services;
 
 public class ScannerService
 {
+    private static readonly string LogFilePath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "AutoSizeScan",
+        "scanner-debug.log");
+
+    private static readonly object LogSync = new();
+
     private const string WIA_DEVICE_MANAGER = "WIA.DeviceManager";
     private const string WIA_DEVICE_TYPE_SCANNER = "1";
     private const string WIA_FORMAT_JPEG = "{B96B3CAE-0728-11D3-9D7B-0000F81EF32E}";
@@ -18,6 +28,10 @@ public class ScannerService
     private const string WIA_DPA_CONNECT_STATUS = "1011";
     private const string WIA_DPS_DOCUMENT_HANDLING_STATUS = "3087";
 
+    private const int WIA_DPS_DOCUMENT_HANDLING_SELECT = 3088;
+    private const int WIA_DPS_DOCUMENT_HANDLING_SELECT_FEEDER = 0x00000001;
+    private const int WIA_DPS_DOCUMENT_HANDLING_SELECT_FLATBED = 0x00000002;
+
     // WIA item (scan) property IDs that define the scan area and resolution.
     private const int WIA_IPS_XRES = 6147;     // Horizontal resolution (DPI)
     private const int WIA_IPS_YRES = 6148;     // Vertical resolution (DPI)
@@ -25,6 +39,7 @@ public class ScannerService
     private const int WIA_IPS_YEXTENT = 6150;  // Height of scan region (pixels)
     private const int WIA_IPS_XPOS = 6151;     // Left start of scan region (pixels)
     private const int WIA_IPS_YPOS = 6152;     // Top start of scan region (pixels)
+    private const int WIA_IPS_PREVIEW = 6157;  // 0 = final scan, 1 = preview thumbnail
 
     // Resolution used for scans. Photo-friendly default; change here if needed.
     private const int DefaultScanDpi = 300;
@@ -325,7 +340,7 @@ public class ScannerService
         }
     }
     
-    public async Task<(BitmapImage image, int width, int height)> ScanDocumentAsync(string scannerName, CancellationToken cancellationToken = default)
+    public async Task<(BitmapImage image, int width, int height)> ScanDocumentAsync(string scannerName, CancellationToken cancellationToken = default, IProgress<string>? progress = null)
     {
         return await Task.Run(() =>
         {
@@ -364,50 +379,65 @@ public class ScannerService
                     throw new Exception($"Scanner '{scannerName}' not found.");
                 }
                 
-                dynamic item = scanner.Items[1];
+                Report(progress, "Scanning (selecting flatbed)…");
+                EnsureFlatbedSelected(scanner);
+                DumpWiaProperties("Scanner properties (pre-scan)", scanner?.Properties);
+
+                dynamic item = SelectScanItem(scanner);
+                DumpWiaItemProperties("Attempt FullBed (pre-config)", item);
 
                 // Attempt 1: configure full-bed properties (correct for most scanners).
+                Report(progress, "Scanning (full bed)…");
                 ConfigureFullBedScan(item);
                 BitmapImage bitmap = TransferToBitmap(item);
+                string lastAttempt = "FullBed";
+                LogAttemptResult(lastAttempt, bitmap);
 
-                // Some drivers (e.g. Brother WSD network scanners) silently ignore WIA
-                // property writes via SubTypeMax, producing a tiny image (e.g. 128x126 px)
-                // that reflects stale driver-internal defaults rather than the full bed.
-                // Detect this by checking whether the shorter dimension is implausibly
-                // small: even 75 DPI on the shortest side of A4/Letter yields ~620 px,
-                // so 500 px is a safe floor.
-                if (Math.Min(bitmap.PixelWidth, bitmap.PixelHeight) < MinValidDimension)
+                if (IsBelowMinimum(bitmap))
                 {
-                    // Attempt 2: force an explicit A4 300 DPI extent via direct value write.
-                    // Brother drivers reject SubTypeMax but do accept direct integer writes.
-                    item = scanner.Items[1];
+                    Log($"Attempt {lastAttempt} returned {DescribeDimensions(bitmap)}, below {MinValidDimension}. Trying HardcodedA4 fallback.");
+                    Report(progress, "Scanning (forcing A4 extent)…");
+                    lastAttempt = "HardcodedA4";
+                    item = SelectScanItem(scanner);
+                    DumpWiaItemProperties("Attempt HardcodedA4 (pre-config)", item);
                     ConfigureHardcodedA4Scan(item);
                     bitmap = TransferToBitmap(item);
+                    LogAttemptResult(lastAttempt, bitmap);
 
-                    if (Math.Min(bitmap.PixelWidth, bitmap.PixelHeight) < MinValidDimension)
+                    if (IsBelowMinimum(bitmap))
                     {
-                        // Attempt 3: bare transfer with no WIA property configuration.
-                        // WSD drivers (e.g. Brother registered as '[deviceid]') ignore all
-                        // property writes but work correctly with their own internal defaults
-                        // once those defaults have been reset via the manufacturer's app
-                        // (e.g. iPrint&Scan). This is the path that works for those drivers.
-                        item = scanner.Items[1];
+                        Log($"Attempt {lastAttempt} returned {DescribeDimensions(bitmap)}, trying PreviewClear fallback.");
+                        Report(progress, "Scanning (clearing preview flag)…");
+                        lastAttempt = "PreviewClear";
+                        item = SelectScanItem(scanner);
+                        DumpWiaItemProperties("Attempt PreviewClear (pre-config)", item);
+                        ConfigurePreviewOnlyScan(item);
                         bitmap = TransferToBitmap(item);
+                        LogAttemptResult(lastAttempt, bitmap);
 
-                        if (Math.Min(bitmap.PixelWidth, bitmap.PixelHeight) < MinValidDimension)
+                        if (IsBelowMinimum(bitmap))
                         {
-                            // All three attempts failed. Driver defaults are also invalid —
-                            // typically a fresh WSD registration with factory defaults.
-                            // Fix: open the manufacturer's scan app (e.g. iPrint&Scan),
-                            // perform one scan to reset the driver state, then retry here.
-                            throw new Exception(
-                                $"Scanner returned a {bitmap.PixelWidth}x{bitmap.PixelHeight} image after three attempts. " +
-                                "The driver defaults may need resetting. Open the manufacturer's scan app " +
-                                "(e.g. iPrint&Scan), perform one scan, then try again.");
+                            Log($"Attempt {lastAttempt} returned {DescribeDimensions(bitmap)}, trying DriverDefaults transfer.");
+                            Report(progress, "Scanning (driver defaults)…");
+                            lastAttempt = "DriverDefaults";
+                            item = SelectScanItem(scanner);
+                            DumpWiaItemProperties("Attempt DriverDefaults (pre-config)", item);
+                            bitmap = TransferToBitmap(item);
+                            LogAttemptResult(lastAttempt, bitmap);
+
+                            if (IsBelowMinimum(bitmap))
+                            {
+                                throw new Exception(
+                                    $"Scanner returned a {bitmap.PixelWidth}x{bitmap.PixelHeight} image after four attempts. " +
+                                    "The driver defaults may need resetting. Open the manufacturer's scan app " +
+                                    "(e.g. iPrint&Scan), perform one scan, then try again.");
+                            }
                         }
                     }
                 }
 
+                Log($"Scan completed using attempt '{lastAttempt}' with final size {bitmap.PixelWidth}x{bitmap.PixelHeight}.");
+                Report(progress, $"Scan complete ({bitmap.PixelWidth} x {bitmap.PixelHeight})");
                 return (bitmap, bitmap.PixelWidth, bitmap.PixelHeight);
             }
             catch (OperationCanceledException)
@@ -473,12 +503,26 @@ public class ScannerService
     {
         dynamic properties = item.Properties;
 
+        TrySetWiaProperty(properties, WIA_IPS_PREVIEW, 0);
         TrySetWiaProperty(properties, WIA_IPS_XRES, DefaultScanDpi);
         TrySetWiaProperty(properties, WIA_IPS_YRES, DefaultScanDpi);
         TrySetWiaProperty(properties, WIA_IPS_XPOS, 0);
         TrySetWiaProperty(properties, WIA_IPS_YPOS, 0);
         TrySetWiaProperty(properties, WIA_IPS_XEXTENT, A4Width300Dpi);
         TrySetWiaProperty(properties, WIA_IPS_YEXTENT, A4Height300Dpi);
+    }
+
+    /// <summary>
+    /// Minimal scan configuration that only clears the preview flag (and reasserts
+    /// resolution) for drivers that reject extent writes but do honour preview mode.
+    /// </summary>
+    private static void ConfigurePreviewOnlyScan(dynamic item)
+    {
+        dynamic properties = item.Properties;
+
+        TrySetWiaProperty(properties, WIA_IPS_PREVIEW, 0);
+        TrySetWiaProperty(properties, WIA_IPS_XRES, DefaultScanDpi);
+        TrySetWiaProperty(properties, WIA_IPS_YRES, DefaultScanDpi);
     }
 
     /// <summary>
@@ -493,7 +537,9 @@ public class ScannerService
     {
         dynamic properties = item.Properties;
 
-        // Resolution first: the driver rescales the extent maxima to match.
+        // Ensure we request a final (non-preview) scan and set resolution first; the driver
+        // rescales the extent maxima to match the chosen DPI.
+        TrySetWiaProperty(properties, WIA_IPS_PREVIEW, 0);
         TrySetWiaProperty(properties, WIA_IPS_XRES, DefaultScanDpi);
         TrySetWiaProperty(properties, WIA_IPS_YRES, DefaultScanDpi);
 
@@ -529,47 +575,486 @@ public class ScannerService
         return null;
     }
 
-    private static void TrySetWiaProperty(dynamic properties, int propertyId, int value)
+    private static bool TrySetWiaProperty(dynamic properties, int propertyId, int value)
     {
         try
         {
             object? found = FindWiaProperty(properties, propertyId);
             if (found == null)
             {
-                return;
+                Log($"WIA property {GetPropertyLabel(propertyId)} not found while applying {value}.");
+                return false;
             }
 
             dynamic prop = found;
             if (!prop.IsReadOnly)
             {
                 prop.Value = value;
+                return true;
             }
+            Log($"WIA property {GetPropertyLabel(propertyId)} is read-only and cannot be set to {value}.");
         }
         catch
         {
-            // Driver rejected the value or doesn't support this property.
+            Log($"WIA property {GetPropertyLabel(propertyId)} rejected value {value}.");
         }
+        return false;
     }
 
-    private static void TrySetWiaPropertyToMax(dynamic properties, int propertyId)
+    private static bool TrySetWiaPropertyToMax(dynamic properties, int propertyId)
     {
         try
         {
             object? found = FindWiaProperty(properties, propertyId);
             if (found == null)
             {
-                return;
+                Log($"WIA property {GetPropertyLabel(propertyId)} not found while applying SubTypeMax.");
+                return false;
             }
 
             dynamic prop = found;
             if (!prop.IsReadOnly)
             {
                 prop.Value = prop.SubTypeMax;
+                return true;
+            }
+            Log($"WIA property {GetPropertyLabel(propertyId)} is read-only and cannot be set to SubTypeMax.");
+        }
+        catch
+        {
+            Log($"WIA property {GetPropertyLabel(propertyId)} rejected SubTypeMax assignment.");
+        }
+        return false;
+    }
+
+    private static dynamic SelectScanItem(dynamic scanner)
+    {
+        var candidates = new List<(object item, int area, string path)>();
+        EnumerateCandidateItems(scanner, "root", candidates);
+
+        if (candidates.Count > 0)
+        {
+            var best = candidates.OrderByDescending(c => c.area).First();
+            Log($"Selected WIA item '{best.path}' with estimated area {best.area}.");
+            return best.item;
+        }
+
+        Log("No candidate WIA items exposed extent properties; falling back to first child.");
+        return GetFirstChild(scanner) ?? scanner;
+    }
+
+    private static void EnumerateCandidateItems(dynamic parent, string path, List<(object item, int area, string path)> sink)
+    {
+        try
+        {
+            int index = 0;
+            foreach (dynamic child in parent.Items)
+            {
+                index++;
+                string name = GetItemName(child, index);
+                string childPath = path.Length == 0 ? name : $"{path}/{name}";
+
+                int area = CalculateItemExtentArea(child);
+                if (area > 0)
+                {
+                    sink.Add((child, area, childPath));
+                    Log($"Candidate WIA item '{childPath}' reports extent area {area}.");
+                }
+                else
+                {
+                    Log($"WIA item '{childPath}' lacks usable extent data, skipping.");
+                }
+
+                EnumerateCandidateItems(child, childPath, sink);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"Failed to enumerate WIA items under '{path}': {ex.Message}");
+        }
+    }
+
+    private static dynamic? GetFirstChild(dynamic parent)
+    {
+        try
+        {
+            foreach (dynamic child in parent.Items)
+            {
+                Log($"Using first available WIA item '{GetItemName(child, 1)}'.");
+                return child;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"Scanner exposes no child items: {ex.Message}");
+        }
+
+        return null;
+    }
+
+    private static int CalculateItemExtentArea(dynamic item)
+    {
+        int width = GetExtentBound(item, WIA_IPS_XEXTENT);
+        int height = GetExtentBound(item, WIA_IPS_YEXTENT);
+
+        if (width <= 0 || height <= 0)
+        {
+            return 0;
+        }
+
+        return width * height;
+    }
+
+    private static int GetExtentBound(dynamic item, int propertyId)
+    {
+        try
+        {
+            dynamic properties = item.Properties;
+            object? found = FindWiaProperty(properties, propertyId);
+            if (found == null)
+            {
+                return 0;
+            }
+
+            dynamic prop = found;
+
+            try
+            {
+                return Convert.ToInt32(prop.SubTypeMax);
+            }
+            catch
+            {
+                try
+                {
+                    return Convert.ToInt32(prop.Value);
+                }
+                catch
+                {
+                    return 0;
+                }
             }
         }
         catch
         {
-            // Driver rejected the value or doesn't support this property.
+            return 0;
+        }
+    }
+
+    private static string GetItemName(dynamic item, int ordinal)
+    {
+        try
+        {
+            dynamic prop = item.Properties["Item Name"];
+            string? value = prop?.Value?.ToString();
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                return value;
+            }
+        }
+        catch
+        {
+            // ignore and fall back to ordinal name
+        }
+
+        return $"Item#{ordinal}";
+    }
+
+    private static void EnsureFlatbedSelected(dynamic scanner)
+    {
+        try
+        {
+            dynamic properties = scanner.Properties;
+            object? selectProp = FindWiaProperty(properties, WIA_DPS_DOCUMENT_HANDLING_SELECT);
+            if (selectProp == null)
+            {
+                Log("WIA_DPS_DOCUMENT_HANDLING_SELECT not supported; assuming flatbed.");
+                return;
+            }
+
+            dynamic prop = selectProp;
+            if (prop.IsReadOnly)
+            {
+                Log("Document handling select property is read-only; cannot force flatbed.");
+                return;
+            }
+
+            int current = Convert.ToInt32(prop.Value);
+            if ((current & WIA_DPS_DOCUMENT_HANDLING_SELECT_FLATBED) != 0)
+            {
+                Log("Flatbed already selected.");
+                return;
+            }
+
+            int desired = current & ~WIA_DPS_DOCUMENT_HANDLING_SELECT_FEEDER;
+            desired |= WIA_DPS_DOCUMENT_HANDLING_SELECT_FLATBED;
+            prop.Value = desired;
+            Log($"Set document handling select to 0x{desired:X} to ensure flatbed is active.");
+        }
+        catch (Exception ex)
+        {
+            Log($"Failed to set document handling select: {ex.Message}");
+        }
+    }
+
+    private static void LogAttemptResult(string attemptName, BitmapSource image)
+    {
+        Log($"Attempt {attemptName} produced {image.PixelWidth}x{image.PixelHeight} pixels.");
+    }
+
+    private static bool IsBelowMinimum(BitmapSource image)
+    {
+        return Math.Min(image.PixelWidth, image.PixelHeight) < MinValidDimension;
+    }
+
+    private static string DescribeDimensions(BitmapSource image)
+    {
+        return $"{image.PixelWidth}x{image.PixelHeight}";
+    }
+
+    private static void Report(IProgress<string>? progress, string message)
+    {
+        progress?.Report(message);
+    }
+
+    private static void DumpWiaItemProperties(string context, dynamic? item)
+    {
+        if (item == null)
+        {
+            Log($"[{context}] Item is null");
+            return;
+        }
+
+        try
+        {
+            string name = TryRead(() => (string)item.ItemName, "<unknown>");
+            string id = TryRead(() => (string)item.ItemID, "<unknown>");
+            string category = TryRead(() => item.ItemCategory != null ? item.ItemCategory.ToString() : "<null>", "<unavailable>");
+            string flags = TryRead(() => ((int)item.ItemFlags).ToString("X"), "<unavailable>");
+            Log($"[{context}] Item summary: Name='{name}', ID='{id}', Flags=0x{flags}, Category={category}");
+        }
+        catch (Exception ex)
+        {
+            Log($"[{context}] Failed to read item summary: {ex.Message}");
+        }
+
+        try
+        {
+            DumpWiaProperties($"{context} properties", item.Properties);
+        }
+        catch (Exception ex)
+        {
+            Log($"[{context}] Failed to enumerate item properties: {ex.Message}");
+        }
+    }
+
+    private static void DumpWiaProperties(string context, dynamic? properties)
+    {
+        Log($"--- WIA properties for {context} ---");
+        if (properties == null)
+        {
+            Log($"[{context}] (no properties)");
+            Log($"--- End of WIA properties for {context} ---");
+            return;
+        }
+
+        try
+        {
+            foreach (dynamic prop in properties)
+            {
+                var parts = new List<string>();
+
+                try
+                {
+                    int id = (int)prop.PropertyID;
+                    parts.Add($"Id=0x{id:X}");
+                }
+                catch
+                {
+                    parts.Add("Id=<unavailable>");
+                }
+
+                try
+                {
+                    string name = prop.Name;
+                    if (!string.IsNullOrWhiteSpace(name))
+                    {
+                        parts.Add($"Name='{name}'");
+                    }
+                }
+                catch
+                {
+                    parts.Add("Name=<unavailable>");
+                }
+
+                try
+                {
+                    bool isReadOnly = prop.IsReadOnly;
+                    parts.Add($"ReadOnly={isReadOnly}");
+                }
+                catch
+                {
+                    parts.Add("ReadOnly=<unavailable>");
+                }
+
+                try
+                {
+                    object? value = prop.Value;
+                    parts.Add($"Value={FormatWiaValue(value)}");
+                }
+                catch (Exception ex)
+                {
+                    parts.Add($"Value=<error: {ex.Message}>");
+                }
+
+                try
+                {
+                    parts.Add($"SubType={prop.SubType}");
+                }
+                catch
+                {
+                }
+
+                try
+                {
+                    parts.Add($"Min={FormatWiaValue(prop.SubTypeMin)}");
+                }
+                catch
+                {
+                }
+
+                try
+                {
+                    parts.Add($"Max={FormatWiaValue(prop.SubTypeMax)}");
+                }
+                catch
+                {
+                }
+
+                try
+                {
+                    parts.Add($"Step={FormatWiaValue(prop.SubTypeStep)}");
+                }
+                catch
+                {
+                }
+
+                try
+                {
+                    var values = prop.SubTypeValues;
+                    if (values != null)
+                    {
+                        parts.Add($"SubValues={FormatWiaValue(values)}");
+                    }
+                }
+                catch
+                {
+                }
+
+                Log($"[{context}] {string.Join("; ", parts)}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"[{context}] Failed to enumerate properties: {ex.Message}");
+        }
+
+        Log($"--- End of WIA properties for {context} ---");
+    }
+
+    private static string FormatWiaValue(object? value)
+    {
+        if (value == null)
+        {
+            return "null";
+        }
+
+        if (value is string s)
+        {
+            return $"\"{s}\"";
+        }
+
+        if (value is Array array)
+        {
+            var samples = new List<string>();
+            int index = 0;
+            foreach (var element in array)
+            {
+                if (index++ >= 5)
+                {
+                    samples.Add("…");
+                    break;
+                }
+                samples.Add(element?.ToString() ?? "null");
+            }
+
+            return $"{array.GetType().Name}[{array.Length}] {{ {string.Join(", ", samples)} }}";
+        }
+
+        if (value is System.Collections.IEnumerable enumerable && value is not string)
+        {
+            var samples = new List<string>();
+            int index = 0;
+            foreach (var element in enumerable)
+            {
+                if (index++ >= 5)
+                {
+                    samples.Add("…");
+                    break;
+                }
+                samples.Add(element?.ToString() ?? "null");
+            }
+
+            return $"{value.GetType().Name} {{ {string.Join(", ", samples)} }}";
+        }
+
+        return $"{value.GetType().Name}: {value}";
+    }
+
+    private static T TryRead<T>(Func<T> accessor, T fallback)
+    {
+        try
+        {
+            return accessor();
+        }
+        catch
+        {
+            return fallback;
+        }
+    }
+
+    private static string GetPropertyLabel(int propertyId) => propertyId switch
+    {
+        WIA_IPS_XRES => nameof(WIA_IPS_XRES),
+        WIA_IPS_YRES => nameof(WIA_IPS_YRES),
+        WIA_IPS_XEXTENT => nameof(WIA_IPS_XEXTENT),
+        WIA_IPS_YEXTENT => nameof(WIA_IPS_YEXTENT),
+        WIA_IPS_XPOS => nameof(WIA_IPS_XPOS),
+        WIA_IPS_YPOS => nameof(WIA_IPS_YPOS),
+        _ => propertyId.ToString()
+    };
+
+    private static void Log(string message)
+    {
+        try
+        {
+            Debug.WriteLine($"[AutoSizeScan] {message}");
+        }
+        catch
+        {
+            // ignored
+        }
+
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(LogFilePath)!);
+            lock (LogSync)
+            {
+                File.AppendAllText(LogFilePath, $"{DateTime.Now:O} {message}{Environment.NewLine}");
+            }
+        }
+        catch
+        {
+            // ignored
         }
     }
 
