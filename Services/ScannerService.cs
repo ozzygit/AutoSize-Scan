@@ -383,6 +383,19 @@ public class ScannerService
                     item = scanner.Items[1];
                     ConfigureHardcodedA4Scan(item);
                     bitmap = TransferToBitmap(item);
+
+                    if (Math.Min(bitmap.PixelWidth, bitmap.PixelHeight) < MinValidDimension)
+                    {
+                        // Both attempts failed — driver is ignoring all WIA property writes.
+                        // This typically happens with WSD-registered scanners (shown as
+                        // '[deviceid]' in the name) whose drivers have no WIA item property
+                        // support. Reinstall using the manufacturer's driver package instead
+                        // of the Windows driverless WSD install.
+                        throw new Exception(
+                            $"Scanner returned a {bitmap.PixelWidth}x{bitmap.PixelHeight} image after two configuration attempts. " +
+                            "The driver may not support WIA property configuration. " +
+                            "Try reinstalling using the manufacturer's full driver package instead of the WSD (driverless) install.");
+                    }
                 }
 
                 return (bitmap, bitmap.PixelWidth, bitmap.PixelHeight);
