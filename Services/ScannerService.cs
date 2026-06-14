@@ -370,15 +370,18 @@ public class ScannerService
                 ConfigureFullBedScan(item);
                 BitmapImage bitmap = TransferToBitmap(item);
 
-                // Some drivers (e.g. Brother network scanners) silently ignore WIA property
-                // writes and scan using their own internal defaults, producing a tiny image
-                // that reflects the leftover extent rather than the full bed. Detect this by
-                // checking whether the shorter dimension is implausibly small: even 75 DPI
-                // on the shortest side of A4/Letter yields ~620 px, so 500 px is a safe floor.
+                // Some drivers (e.g. Brother WSD network scanners) silently ignore WIA
+                // property writes via SubTypeMax, producing a tiny image (e.g. 128x126 px)
+                // that reflects stale driver-internal defaults rather than the full bed.
+                // Detect this by checking whether the shorter dimension is implausibly
+                // small: even 75 DPI on the shortest side of A4/Letter yields ~620 px,
+                // so 500 px is a safe floor.
                 if (Math.Min(bitmap.PixelWidth, bitmap.PixelHeight) < MinValidDimension)
                 {
-                    // Attempt 2: driver default — let the driver scan with its own settings.
+                    // Attempt 2: force an explicit A4 300 DPI extent via direct value write.
+                    // Brother drivers reject SubTypeMax but do accept direct integer writes.
                     item = scanner.Items[1];
+                    ConfigureHardcodedA4Scan(item);
                     bitmap = TransferToBitmap(item);
                 }
 
@@ -431,6 +434,28 @@ public class ScannerService
         {
             File.Delete(tempPath);
         }
+    }
+
+    // A4 page at 300 DPI: 8.27" × 11.69" = 2480 × 3508 pixels.
+    // Used as an explicit fallback extent for drivers that ignore SubTypeMax.
+    private const int A4Width300Dpi = 2480;
+    private const int A4Height300Dpi = 3508;
+
+    /// <summary>
+    /// Fallback scan configuration for drivers (e.g. Brother WSD) that ignore
+    /// SubTypeMax extent writes. Sets an explicit A4 300 DPI extent via direct
+    /// integer value assignment, which these drivers do accept.
+    /// </summary>
+    private static void ConfigureHardcodedA4Scan(dynamic item)
+    {
+        dynamic properties = item.Properties;
+
+        TrySetWiaProperty(properties, WIA_IPS_XRES, DefaultScanDpi);
+        TrySetWiaProperty(properties, WIA_IPS_YRES, DefaultScanDpi);
+        TrySetWiaProperty(properties, WIA_IPS_XPOS, 0);
+        TrySetWiaProperty(properties, WIA_IPS_YPOS, 0);
+        TrySetWiaProperty(properties, WIA_IPS_XEXTENT, A4Width300Dpi);
+        TrySetWiaProperty(properties, WIA_IPS_YEXTENT, A4Height300Dpi);
     }
 
     /// <summary>
