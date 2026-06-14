@@ -131,21 +131,12 @@ public partial class MainWindow : Window
             ScanButton.IsEnabled = false;
             
             var scannerName = ScannerComboBox.SelectedItem.ToString()!;
-            var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60)); // 60 second timeout
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
             
             var (image, _, _) = await _scannerService.ScanDocumentAsync(scannerName, cts.Token);
 
             // Auto-crop the empty bed area around the photo.
-            var cropped = ImageProcessor.AutoCropToContent(image, out var cropW, out var cropH);
-
-            // TROUBLESHOOTING: Added validation to prevent displaying invalid/blank images
-            // This catches cases where auto-crop might produce invalid dimensions
-            if (cropped.PixelWidth <= 0 || cropped.PixelHeight <= 0)
-            {
-                StatusText.Text = "Scan produced invalid image - try scanning again";
-                ClearScan();
-                return;
-            }
+            var cropped = ImageProcessor.AutoCropToContent(image);
 
             _lastScannedImage = cropped;
             _hasUnsavedScan = true;

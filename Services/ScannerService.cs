@@ -384,6 +384,10 @@ public class ScannerService
 
                 return (bitmap, bitmap.PixelWidth, bitmap.PixelHeight);
             }
+            catch (OperationCanceledException)
+            {
+                throw; // preserve cancellation so the UI can show the timeout message
+            }
             catch (COMException ex)
             {
                 throw new Exception($"Scan failed with COM error 0x{ex.ErrorCode:X8}: {ex.Message}", ex);
@@ -413,13 +417,20 @@ public class ScannerService
         var tempPath = Path.Combine(Path.GetTempPath(), $"scan_{Guid.NewGuid()}.jpg");
         imageFile.SaveFile(tempPath);
 
-        var bitmap = new BitmapImage();
-        bitmap.BeginInit();
-        bitmap.CacheOption = BitmapCacheOption.OnLoad;
-        bitmap.UriSource = new Uri(tempPath);
-        bitmap.EndInit();
-        bitmap.Freeze();
-        return bitmap;
+        try
+        {
+            var bitmap = new BitmapImage();
+            bitmap.BeginInit();
+            bitmap.CacheOption = BitmapCacheOption.OnLoad; // copies pixels to memory before EndInit
+            bitmap.UriSource = new Uri(tempPath);
+            bitmap.EndInit();
+            bitmap.Freeze();
+            return bitmap;
+        }
+        finally
+        {
+            File.Delete(tempPath);
+        }
     }
 
     /// <summary>

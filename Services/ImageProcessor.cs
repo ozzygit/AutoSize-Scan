@@ -28,7 +28,7 @@ public static class ImageProcessor
     /// dark bed edges). Falls back to the original image if no photo region
     /// is found.
     /// </summary>
-    public static BitmapSource AutoCropToContent(BitmapSource source, out int width, out int height)
+    public static BitmapSource AutoCropToContent(BitmapSource source)
     {
         // Work in a known 32bpp BGRA layout.
         var bgra = source.Format == PixelFormats.Bgra32
@@ -86,8 +86,6 @@ public static class ImageProcessor
         // No textured region detected -> keep the original.
         if (top < 0 || bottom < 0 || left < 0 || right < 0 || bottom <= top || right <= left)
         {
-            width = w;
-            height = h;
             return source;
         }
 
@@ -103,16 +101,12 @@ public static class ImageProcessor
         // If the detected region is essentially the whole bed, nothing to crop.
         if (cropW >= w - 1 && cropH >= h - 1)
         {
-            width = w;
-            height = h;
             return source;
         }
 
         var cropped = new CroppedBitmap(bgra, new System.Windows.Int32Rect(left, top, cropW, cropH));
         cropped.Freeze();
 
-        width = cropW;
-        height = cropH;
         return cropped;
     }
 
