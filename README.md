@@ -1,40 +1,53 @@
-# AutoSize Scan
+# AutoSize Studio (in development)
 
-A simple application that scans photos using a scanner and automatically saves the image based on the scanned size, without requiring the user to specify a paper size.
+AutoSize Studio is the next evolution of the AutoSize project. After extensive work with WIA (Windows Image Acquisition) drivers we hit a hard limit: too many scanners—especially WSD and older network devices—ship only preview-oriented WIA mini-drivers that ignore crop/extent commands. Rather than ship a brittle experience, we are pivoting the product from *driving scanners* to *polishing the scans you already have*.
 
-## Features
+The new vision keeps the beloved “auto-size” philosophy but applies it to existing photo libraries, particularly aging family archives. AutoSize Studio will ingest images from disk, automatically isolate the photograph from the flatbed background, and layer on modern restoration tooling (auto-enhance, color recovery, upscaling, denoise, retouch) completely offline.
 
-- Automatic document size detection
-- Support for WIA-compatible scanners
-- Saves images with actual scanned dimensions
-- No manual paper size specification required
-- Scanner connectivity testing to filter non-responsive devices
-- Device in-use detection with user warnings
-- Async scanning with timeout protection
+---
 
-## Technology Stack
+## Why the pivot?
+
+* **WIA driver fragmentation** – Many BROTHER/Canon/Epson WSD drivers only expose thumbnail preview items via WIA, rejecting our attempts to select the full-bed extent. Resetting drivers through manufacturer utilities worked sporadically and required manual intervention.
+* **TWAIN-only devices** – A large portion of legacy scanners never shipped WIA drivers. Supporting them would require a parallel TWAIN stack and 32-bit hosting, increasing app complexity.
+* **User feedback** – Most early testers already had images saved (from kiosks, labs, phone photos of prints) and primarily wanted quick border removal, straightening, and cleanup rather than a new scanning UI.
+
+Given those hurdles, AutoSize Studio focuses on the universal problem: making imperfect scans look like freshly digitised originals.
+
+---
+
+## Planned feature set
+
+| Area | Highlights |
+|------|------------|
+| **Import & Library** | Drag/drop folders or individual files, duplicate detection, EXIF ingest, batch selection, watch-folder automation |
+| **Smart Cropping** | Auto-detect photo vs. flatbed background, adjustable bed-mask overlays, aspect presets, manual crop handles |
+| **Restoration Suite (offline AI)** | Auto enhance, color-cast correction, sepia fade recovery, exposure/contrast leveling, denoise, dehaze, face-aware tone fixes, super-resolution upscaling, OCR sidecar export |
+| **Retouch Tools** | Spot heal, clone/repair, dust & scratch removal, edge-aware smoothing, local adjustments |
+| **Workspace UX** | Multi-image queue, before/after slider, histogram & tone curve, zoom/rotate, keyboard shortcuts, undo/redo history |
+| **Batch Automation** | Queue HUD, pause/resume, preset pipelines (e.g. “Polaroid cleanup”), session restore, contact-sheet export |
+| **Export** | JPEG/PNG/TIFF/PDF, naming templates, destination profiles, clipboard copy, optional integrations |
+
+All “AI” capabilities are delivered via bundled ONNX/ML.NET models so the app runs fully offline—no image is ever uploaded to the cloud.
+
+---
+
+## Technology stack
 
 - .NET 8
-- WPF
-- WIA (Windows Image Acquisition) API
+- WPF desktop UI
+- ImageSharp + custom pixel shaders for classical processing
+- ML.NET / ONNX Runtime (DirectML) for on-device AI helpers
 
-## Known Limitations
+Legacy WIA scanning code remains in the repo for historical reference, but the primary application will transition to this new workflow.
 
-- **LAN/Network Scanners**: Some network scanners may not work properly with WIA due to driver limitations. The application uses WIA (Windows Image Acquisition) which is the standard Windows scanning API. If your network scanner doesn't appear or fails to scan, it may require TWAIN support or manufacturer-specific drivers.
+---
 
-## Getting Started
+## Next steps
 
-1. Ensure your scanner is properly installed and recognized by Windows
-2. Run the application
-3. Select your scanner from the dropdown
-4. Click "Scan Document"
-5. The scanned image will be saved to your Desktop with a timestamp
+1. Finalise UI mocks for the library & workspace screens
+2. Stand up the modular processing pipeline with undo/redo support
+3. Integrate first round of enhancement models (auto-crop + color restore)
+4. Ship preview builds focused on batch border cleanup
 
-## Scanner Compatibility
-
-The application works best with:
-- USB-connected scanners with WIA drivers
-- WSD (Web Services for Devices) scanners
-- Locally connected flatbed scanners
-
-Network scanners may have limited compatibility depending on their driver implementation.
+We welcome feedback—especially sample scans from aging photo albums—to ensure AutoSize Studio truly bridges the gap left by legacy flatbed software.
