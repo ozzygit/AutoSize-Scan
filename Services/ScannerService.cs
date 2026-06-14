@@ -386,15 +386,25 @@ public class ScannerService
 
                     if (Math.Min(bitmap.PixelWidth, bitmap.PixelHeight) < MinValidDimension)
                     {
-                        // Both attempts failed — driver is ignoring all WIA property writes.
-                        // This typically happens with WSD-registered scanners (shown as
-                        // '[deviceid]' in the name) whose drivers have no WIA item property
-                        // support. Reinstall using the manufacturer's driver package instead
-                        // of the Windows driverless WSD install.
-                        throw new Exception(
-                            $"Scanner returned a {bitmap.PixelWidth}x{bitmap.PixelHeight} image after two configuration attempts. " +
-                            "The driver may not support WIA property configuration. " +
-                            "Try reinstalling using the manufacturer's full driver package instead of the WSD (driverless) install.");
+                        // Attempt 3: bare transfer with no WIA property configuration.
+                        // WSD drivers (e.g. Brother registered as '[deviceid]') ignore all
+                        // property writes but work correctly with their own internal defaults
+                        // once those defaults have been reset via the manufacturer's app
+                        // (e.g. iPrint&Scan). This is the path that works for those drivers.
+                        item = scanner.Items[1];
+                        bitmap = TransferToBitmap(item);
+
+                        if (Math.Min(bitmap.PixelWidth, bitmap.PixelHeight) < MinValidDimension)
+                        {
+                            // All three attempts failed. Driver defaults are also invalid —
+                            // typically a fresh WSD registration with factory defaults.
+                            // Fix: open the manufacturer's scan app (e.g. iPrint&Scan),
+                            // perform one scan to reset the driver state, then retry here.
+                            throw new Exception(
+                                $"Scanner returned a {bitmap.PixelWidth}x{bitmap.PixelHeight} image after three attempts. " +
+                                "The driver defaults may need resetting. Open the manufacturer's scan app " +
+                                "(e.g. iPrint&Scan), perform one scan, then try again.");
+                        }
                     }
                 }
 
